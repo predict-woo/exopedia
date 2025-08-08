@@ -199,7 +199,7 @@ ${RULES}
 
   for (let turn = 0; turn < 12; turn++) {
     const response = await ai.models.generateContent({
-      model: "gemini-2.5-pro",
+      model: "gemini-2.5-flash",
       contents,
       config: {
         systemInstruction: systemPrompt,
@@ -500,7 +500,7 @@ export async function POST(request: NextRequest) {
 
     // FAST-FIRST-TURN: decide A/B quickly using only summary index search via the model
     const fastDecision = await ai.models.generateContent({
-      model: "gemini-2.5-pro",
+      model: "gemini-2.5-flash",
       contents: [
         {
           role: "user",
