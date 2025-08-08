@@ -27,7 +27,7 @@ export async function createOrGetQueueJob(params: {
     return {
       id: existing.id as string,
       status: existing.status as QueueStatus,
-      resultSlug: (existing as any).result_slug as string | null,
+      resultSlug: existing.result_slug as string | null,
       wasCreated: false,
     };
   }

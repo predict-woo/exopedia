@@ -37,23 +37,31 @@ export function QueueProgress({ queueId }: { queueId: string }) {
   const [error, setError] = useState<string | null>(null);
   const timerRef = useRef<number | null>(null);
 
-  const fetchStatus = async () => {
-    try {
-      const res = await fetch(`/api/queue/${queueId}`, { cache: "no-store" });
-      if (!res.ok)
-        throw new Error(`Failed to fetch queue status: ${res.status}`);
-      const json = (await res.json()) as ApiResponse;
-      setData(json);
-      setError(null);
-    } catch (e) {
-      setError((e as Error).message);
-    }
-  };
-
   useEffect(() => {
-    fetchStatus();
+    let isCancelled = false;
+
+    const fetchStatus = async () => {
+      try {
+        const res = await fetch(`/api/queue/${queueId}`, { cache: "no-store" });
+        if (!res.ok) {
+          throw new Error(`Failed to fetch queue status: ${res.status}`);
+        }
+        const json = (await res.json()) as ApiResponse;
+        if (!isCancelled) {
+          setData(json);
+          setError(null);
+        }
+      } catch (e) {
+        if (!isCancelled) {
+          setError((e as Error).message);
+        }
+      }
+    };
+
+    void fetchStatus();
     timerRef.current = window.setInterval(fetchStatus, 1500);
     return () => {
+      isCancelled = true;
       if (timerRef.current) window.clearInterval(timerRef.current);
     };
   }, [queueId]);
