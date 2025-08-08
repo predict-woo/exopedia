@@ -127,9 +127,9 @@ ${RULES}
 - 링크 주변 컨텍스트: ${localContext}
 
 작업 순서(분기 B 전용):
-1. search_content_index(RAG)를 이용한 주제에 대한 사전조사, 최대 3번까지 가능
+1. search_content_index(RAG)를 이용한 주제에 대한 사전조사, 최대 1번
 2. 신규 문서 요약 및 본문 초안 생각
-3. 초안의 각 부분에 대한 search_content_index(RAG), 최대 5번까지 가능. 이후 검색된 정보를 활용한 수정본 생각
+3. 초안의 각 부분에 대한 search_content_index(RAG), 1~3번까지 가능, 되도록이면 적게. 이후 검색된 정보를 활용한 수정본 생각
 3. 링크 후보를 추출하고 batch_resolve_summary_index로 존재 여부 확인 → 존재는 /wiki/{slug}, 미존재는 /create/{target-slug}
 4. persist_new_page로 저장
 5. 소스 문서의 빨간 링크를 방금 생성된 파란 링크(/wiki/{canonicalSlug})로 교체하고 필요한 최소 범위를 편집하여 persist_page_update로 저장
