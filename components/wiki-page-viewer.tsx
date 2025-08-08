@@ -307,12 +307,22 @@ export function WikiPageViewer({ page }: WikiPageViewerProps) {
           )}
 
           {/* Markdown Content */}
-          <ReactMarkdown
-            remarkPlugins={[remarkGfm]}
-            components={customRenderers}
-          >
-            {page.markdown}
-          </ReactMarkdown>
+          {(() => {
+            // Normalize invisible characters globally that can break markdown emphasis parsing
+            const normalizedMarkdown = page.markdown
+              .replace(/\uFEFF/g, "") // BOM anywhere
+              .replace(/[\u200B-\u200D\u2060\u200E\u200F]/g, "") // zero-widths & dir marks
+              .replace(/\r\n/g, "\n"); // normalize newlines
+
+            return (
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                components={customRenderers}
+              >
+                {normalizedMarkdown}
+              </ReactMarkdown>
+            );
+          })()}
         </article>
 
         {/* Report Button */}
