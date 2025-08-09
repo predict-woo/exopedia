@@ -470,24 +470,7 @@ export async function POST(request: NextRequest) {
     // Initialize Gemini with function calling
     const ai = getGeminiClient();
 
-    // Build initial conversation
-    const contents: Array<{
-      role: "user" | "model";
-      parts: Array<Record<string, unknown>>;
-    }> = [
-      {
-        role: "user",
-        parts: [
-          {
-            text:
-              `소스 문서 전체 내용:\n\n${sourcePageData.markdown}\n\n` +
-              `링크 클릭: "${linkText}" (${targetSlug})\n` +
-              `링크 주변 컨텍스트: ${localContext}\n\n` +
-              `이제 위의 작업 순서에 따라 진행하세요.`,
-          },
-        ],
-      },
-    ];
+    // (Background session will rebuild its own conversation internally.)
 
     const tools: Array<{ functionDeclarations: FunctionDeclaration[] }> = [
       {
@@ -499,7 +482,33 @@ export async function POST(request: NextRequest) {
       tools[0].functionDeclarations.map((f) => f.name)
     );
 
-    // FAST-FIRST-TURN: decide A/B quickly using only summary index search via the model
+    // FAST-FIRST-TURN: decide A/B. We run summary search ourselves and let the model choose between two tools.
+    // 1) Run summary index search on server (not via tool) so the model isn't forced to call any search function
+    const fastSearch = await searchSummaryIndex(linkText, 5, 0.3);
+
+    // Prepare compact candidates including summaries
+    const candidatesForDecision = (fastSearch.matches || []).map(
+      (m: {
+        slug: string;
+        title: string;
+        score: number;
+        summary?: string | null;
+      }) => ({
+        slug: m.slug,
+        title: m.title,
+        score: m.score,
+        summary: snip(m.summary ?? "", 400),
+      })
+    );
+
+    console.log(candidatesForDecision);
+
+    // Limit tools to just decision tools
+    const fastToolDecls = getFunctionDeclarations().filter(
+      (d) =>
+        d.name === "redirect_to_existing" || d.name === "declare_no_existing"
+    );
+
     const fastDecision = await ai.models.generateContent({
       model: "gemini-2.5-flash",
       contents: [
@@ -508,19 +517,23 @@ export async function POST(request: NextRequest) {
           parts: [
             {
               text:
-                `소스 문서 전체 내용:\n\n${sourcePageData.markdown}\n\n` +
-                `링크 클릭: "${linkText}" (${targetSlug})\n` +
-                `링크 주변 컨텍스트: ${localContext}\n\n` +
-                `동일/유사 주제 존재 판단만 수행하세요. 반드시 search_summary_index만 호출하고, 존재 시 redirect_to_existing(slug)만 호출하세요. 생성 관련 함수는 절대 호출하지 마세요.`,
+                `링크 텍스트: "${linkText}" (${targetSlug})\n` +
+                `링크 주변 컨텍스트: ${snip(localContext, 500)}\n\n` +
+                `다음은 요약 임베딩 검색 결과 상위 후보입니다(서버 제공):\n` +
+                `${JSON.stringify(candidatesForDecision)}\n\n` +
+                `작업: 동일 주제의 기존 문서 존재 여부를 결정하세요. 존재한다고 판단되면 redirect_to_existing(slug)를 호출하고, 없다면 declare_no_existing()을 호출하세요. 생성 관련 함수는 절대 호출하지 마세요.`,
             },
           ],
         },
       ],
       config: {
-        systemInstruction: `분기 결정 전용 턴입니다. summary index에서 임계값(0.85) 이상인 경우에만 redirect_to_existing를 호출합니다. 그 외엔 함수 호출 없이 종료하세요.`,
-        tools: [{ functionDeclarations: getFunctionDeclarations() }],
+        systemInstruction:
+          `당신은 제공된 후보들의 요약과 점수를 바탕으로 링크의 주제와 동일한 문서가 있는지 판단합니다.\n` +
+          `후보중 일치하는 후보가 존재한다고 판단되면 redirect_to_existing(slug)를 호출하고, 아니라면 declare_no_existing()을 호출하세요.\n` +
+          `절대 다른 도구는 호출하지 마세요.`,
+        tools: [{ functionDeclarations: fastToolDecls }],
         toolConfig: {
-          functionCallingConfig: { mode: FunctionCallingConfigMode.ANY },
+          functionCallingConfig: { mode: FunctionCallingConfigMode.AUTO },
         },
         thinkingConfig: { includeThoughts: true },
         temperature: 0.3,
@@ -529,42 +542,17 @@ export async function POST(request: NextRequest) {
 
     let existingSlug: string | null = null;
     for (const fc of fastDecision.functionCalls || []) {
-      if (fc.name === "search_summary_index") {
-        const result = await searchSummaryIndex(
-          String(
-            (fc as { args?: Record<string, unknown> }).args?.query ?? linkText
-          ),
-          typeof (fc as { args?: Record<string, unknown> }).args?.topK ===
-            "number"
-            ? ((fc as { args?: Record<string, unknown> }).args!.topK as number)
-            : 5,
-          typeof (fc as { args?: Record<string, unknown> }).args?.threshold ===
-            "number"
-            ? ((fc as { args?: Record<string, unknown> }).args!
-                .threshold as number)
-            : 0.85
-        );
-        contents.push({ role: "model", parts: [{ functionCall: fc }] });
-        contents.push({
-          role: "user",
-          parts: [
-            { functionResponse: { name: fc.name, response: { result } } },
-          ],
-        });
-        if (
-          result.matches &&
-          result.matches[0] &&
-          result.matches[0].score >= 0.85
-        ) {
-          existingSlug = result.matches[0].slug;
-        }
-      }
       if (fc.name === "redirect_to_existing") {
         existingSlug = String(
           (fc as { args?: Record<string, unknown> }).args?.slug ?? existingSlug
         );
       }
+      if (fc.name === "declare_no_existing") {
+        existingSlug = null;
+      }
     }
+
+    console.log(existingSlug);
 
     // Create or get queue job for background
     const job = await createOrGetQueueJob({

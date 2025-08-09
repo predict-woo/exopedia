@@ -101,7 +101,8 @@ const functionDeclarations = [
   },
   {
     name: "persist_new_page",
-    description: "Create and persist a new wiki page",
+    description:
+      "Create and persist a new wiki page. if this fails, try using a different and more specific slug.",
     parameters: {
       type: Type.OBJECT,
       properties: {
@@ -135,6 +136,16 @@ const functionDeclarations = [
         slug: { type: Type.STRING },
       },
       required: ["slug"],
+    },
+  },
+  {
+    name: "declare_no_existing",
+    description:
+      "Declare that no existing page matches the topic. Use this in decision-only turn when no suitable existing page is found.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {},
+      required: [],
     },
   },
   {
@@ -174,7 +185,38 @@ export async function searchSummaryIndex(
     return { matches: [] };
   }
 
-  return { matches: data || [] };
+  const matches = data || [];
+
+  // Enrich with actual page summaries so the model can decide equivalence
+  if (matches.length > 0) {
+    const pageIds = matches.map((m: { page_id: number }) => m.page_id);
+    const { data: pages } = await supabase
+      .from("pages")
+      .select("id, summary")
+      .in("id", pageIds);
+
+    const idToSummary = new Map<number, string | null>();
+    for (const p of pages || []) {
+      idToSummary.set(
+        p.id as number,
+        (p as { summary?: string | null }).summary ?? null
+      );
+    }
+
+    const enriched = matches.map(
+      (m: { page_id: number; slug: string; title: string; score: number }) => ({
+        page_id: m.page_id,
+        slug: m.slug,
+        title: m.title,
+        score: m.score,
+        summary: idToSummary.get(m.page_id) ?? null,
+      })
+    );
+
+    return { matches: enriched };
+  }
+
+  return { matches };
 }
 
 export async function batchResolveSummaryIndex(
