@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { Card, CardContent } from "@/components/ui/card";
+import { useRouter } from "next/navigation";
 
 type QueueJob = {
   id: string;
@@ -36,6 +37,7 @@ export function QueueProgress({ queueId }: { queueId: string }) {
   const [data, setData] = useState<ApiResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const timerRef = useRef<number | null>(null);
+  const router = useRouter();
 
   useEffect(() => {
     let isCancelled = false;
@@ -66,12 +68,13 @@ export function QueueProgress({ queueId }: { queueId: string }) {
     };
   }, [queueId]);
 
-  // Auto-redirect when succeeded
+  // Auto-redirect when succeeded (replace history so Back returns to source page)
   useEffect(() => {
     if (data?.job.status === "succeeded" && data.job.result_slug) {
-      window.location.href = `/wiki/${data.job.result_slug}`;
+      if (timerRef.current) window.clearInterval(timerRef.current);
+      router.replace(`/wiki/${data.job.result_slug}`);
     }
-  }, [data]);
+  }, [data, router]);
 
   const statusBadge = useMemo(() => {
     const s = data?.job.status;
@@ -176,6 +179,7 @@ export function QueueProgress({ queueId }: { queueId: string }) {
               <Link
                 className="underline"
                 href={`/wiki/${data.job.result_slug}`}
+                replace
               >
                 생성된 문서로 이동
               </Link>

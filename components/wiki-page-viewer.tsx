@@ -31,6 +31,104 @@ export function WikiPageViewer({ page }: WikiPageViewerProps) {
   const [creatingLink, setCreatingLink] = useState<string | null>(null);
   const [reportDialogOpen, setReportDialogOpen] = useState(false);
 
+  // Smaller, summary-specific markdown renderers
+  const summaryRenderers: Components = {
+    a: ({ href, children, ...props }) => {
+      if (!href) return <span>{children}</span>;
+      if (href.startsWith("http://") || href.startsWith("https://")) {
+        return (
+          <a
+            href={href}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-blue-600 dark:text-blue-400 hover:underline"
+            {...props}
+          >
+            {children}
+          </a>
+        );
+      }
+      if (href.startsWith("/wiki/")) {
+        return (
+          <Link
+            href={href}
+            className="text-blue-600 dark:text-blue-400 hover:underline"
+            {...props}
+          >
+            {children}
+          </Link>
+        );
+      }
+      if (href.startsWith("/create/")) {
+        const targetSlug = href.replace("/create/", "");
+        const isThisLink = creatingLink === targetSlug;
+        return (
+          <button
+            onClick={() => handleCreateLink(targetSlug)}
+            disabled={isCreating}
+            className={`text-red-600 dark:text-red-400 hover:underline disabled:opacity-50 disabled:cursor-not-allowed ${
+              isThisLink ? "animate-pulse" : ""
+            }`}
+          >
+            {children}
+            {isThisLink && (
+              <Loader2 className="inline ml-1 h-3 w-3 animate-spin" />
+            )}
+          </button>
+        );
+      }
+      return (
+        <Link href={href} {...props}>
+          {children}
+        </Link>
+      );
+    },
+    p: ({ children, ...props }) => (
+      <p className="text-sm leading-relaxed" {...props}>
+        {children}
+      </p>
+    ),
+    ul: ({ children, ...props }) => (
+      <ul className="list-disc list-outside pl-6 space-y-1" {...props}>
+        {children}
+      </ul>
+    ),
+    ol: ({ children, ...props }) => (
+      <ol className="list-decimal list-outside pl-6 space-y-1" {...props}>
+        {children}
+      </ol>
+    ),
+    li: ({ children, ...props }) => (
+      <li className="[&>p]:m-0" {...props}>
+        {children}
+      </li>
+    ),
+    code: ({ children, className, ...props }) => {
+      const text = Array.isArray(children)
+        ? children.join("")
+        : String(children ?? "");
+      const isBlock = /language-/.test(className ?? "") || text.includes("\n");
+      if (!isBlock) {
+        return (
+          <code
+            className="px-1 py-0.5 rounded bg-muted text-[0.8rem] font-mono"
+            {...props}
+          >
+            {children}
+          </code>
+        );
+      }
+      return (
+        <code
+          className="block p-3 rounded-lg bg-muted font-mono text-sm overflow-x-auto"
+          {...props}
+        >
+          {children}
+        </code>
+      );
+    },
+  };
+
   const handleCreateLink = async (targetSlug: string) => {
     setIsCreating(true);
     setCreatingLink(targetSlug);
@@ -95,7 +193,7 @@ export function WikiPageViewer({ page }: WikiPageViewerProps) {
         return (
           <Link
             href={href}
-            className="text-blue-600 dark:text-blue-400 hover:underline font-medium"
+            className="text-blue-600 dark:text-blue-400 hover:underline"
             {...props}
           >
             {children}
@@ -112,7 +210,7 @@ export function WikiPageViewer({ page }: WikiPageViewerProps) {
           <button
             onClick={() => handleCreateLink(targetSlug)}
             disabled={isCreating}
-            className={`text-red-600 dark:text-red-400 hover:underline font-medium disabled:opacity-50 disabled:cursor-not-allowed ${
+            className={`text-red-600 dark:text-red-400 hover:underline disabled:opacity-50 disabled:cursor-not-allowed ${
               isThisLink ? "animate-pulse" : ""
             }`}
           >
@@ -158,14 +256,19 @@ export function WikiPageViewer({ page }: WikiPageViewerProps) {
       </p>
     ),
     ul: ({ children, ...props }) => (
-      <ul className="list-disc list-inside mb-4 space-y-1" {...props}>
+      <ul className="list-disc list-outside pl-6 mb-4 space-y-1" {...props}>
         {children}
       </ul>
     ),
     ol: ({ children, ...props }) => (
-      <ol className="list-decimal list-inside mb-4 space-y-1" {...props}>
+      <ol className="list-decimal list-outside pl-6 mb-4 space-y-1" {...props}>
         {children}
       </ol>
+    ),
+    li: ({ children, ...props }) => (
+      <li className="[&>p]:m-0" {...props}>
+        {children}
+      </li>
     ),
     blockquote: ({ children, ...props }) => (
       <blockquote
@@ -301,7 +404,22 @@ export function WikiPageViewer({ page }: WikiPageViewerProps) {
           {page.summary && (
             <Card className="mb-8 bg-muted/50">
               <CardContent className="pt-6">
-                <p className="text-sm leading-relaxed">{page.summary}</p>
+                {(() => {
+                  const normalizedSummary = page.summary
+                    .replace(/\uFEFF/g, "")
+                    .replace(/[\u200B-\u200D\u2060\u200E\u200F]/g, "")
+                    .replace(/\r\n/g, "\n");
+                  return (
+                    <div className="prose prose-sm dark:prose-invert max-w-none">
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm]}
+                        components={summaryRenderers}
+                      >
+                        {normalizedSummary}
+                      </ReactMarkdown>
+                    </div>
+                  );
+                })()}
               </CardContent>
             </Card>
           )}
