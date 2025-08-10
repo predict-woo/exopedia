@@ -1,9 +1,9 @@
 import { config } from "dotenv";
 import { createClient } from "@supabase/supabase-js";
 import {
-  generateEmbedding,
   chunkText,
   generateEmbeddings,
+  generateTitleEmbedding,
 } from "../lib/embeddings";
 
 // Load environment variables
@@ -125,20 +125,24 @@ async function seedDatabase() {
 
     console.log("Created main page with ID:", page.id);
 
-    // Generate and store summary embedding
-    console.log("Generating summary embedding...");
-    const summaryEmbedding = await generateEmbedding(mainPageSummary);
-
-    const { error: summaryEmbedError } = await supabase
-      .from("summary_embeddings")
-      .insert({
-        page_id: page.id,
-        embedding: summaryEmbedding,
-      });
-
-    if (summaryEmbedError) {
-      console.error("Error inserting summary embedding:", summaryEmbedError);
-      throw summaryEmbedError;
+    // Generate and store title embedding on pages table (optional)
+    console.log("Generating title embedding...");
+    try {
+      const titleEmbedding = await generateTitleEmbedding(
+        "엑소피디아 메인 페이지"
+      );
+      const { error: titleUpdateError } = await supabase
+        .from("pages")
+        .update({ title_embedding: titleEmbedding })
+        .eq("id", page.id);
+      if (titleUpdateError) {
+        console.warn(
+          "Failed to set title embedding on page:",
+          titleUpdateError
+        );
+      }
+    } catch (e) {
+      console.warn("Skipping title embedding due to error:", e);
     }
 
     // Chunk content and generate embeddings

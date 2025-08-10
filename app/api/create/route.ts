@@ -4,8 +4,8 @@ import { createClient } from "@/lib/supabase/server";
 import {
   getGeminiClient,
   getFunctionDeclarations,
-  searchSummaryIndex,
-  batchResolveSummaryIndex,
+  searchPageIndex,
+  batchResolvePageIndex,
   searchContentIndex,
   getPage,
   persistNewPage,
@@ -131,11 +131,12 @@ ${RULES}
 1. search_content_index(RAG)를 이용한 주제에 대한 사전조사, 최대 1번
 2. 신규 문서 요약 및 본문 초안 생각
 3. 초안의 각 부분에 대한 search_content_index(RAG), 1~3번까지 가능, 되도록이면 적게. 이후 검색된 정보를 활용한 수정본 생각
-3. 링크 후보를 추출하고 batch_resolve_summary_index로 존재 여부 확인 → 존재는 /wiki/{slug}, 미존재는 /create/{target-slug}.
-4. persist_new_page로 저장
-5. 소스 문서의 빨간 링크를 방금 생성된 파란 링크(/wiki/{canonicalSlug})로 교체하고 필요한 최소 범위를 편집하여 persist_page_update로 저장
+4. 생각한 수정본에서 추출할만한 링크가 무엇이 있을지 생각합니다.
+5. 반드시 batch_resolve_page_index로 링크 존재 여부를 조회합니다. 각 후보에 대해 반환된 summary를 읽고, 제목 유사도에 의존하지 말고 요약 내용 기준으로 동일 주제라고 명확히 판단될 때에만 /wiki/{slug}로 연결하세요. 애매하거나 불확실하면 그대로 /create/{target-slug}를 유지합니다.
+6. persist_new_page로 저장
+7. 소스 문서의 빨간 링크를 방금 생성된 파란 링크(/wiki/{canonicalSlug})로 교체하고 필요한 최소 범위를 편집하여 persist_page_update로 저장
 분기 A로 절대 진행하지 않습니다.
-6. 모든 단계가 성공적으로 완료되면, finish_session 으로 세션 종료`;
+8. 모든 단계가 성공적으로 완료되면, finish_session 으로 세션 종료`;
 
   const tools: Array<{ functionDeclarations: FunctionDeclaration[] }> = [
     { functionDeclarations: getFunctionDeclarations() },
@@ -233,8 +234,8 @@ ${RULES}
 
       try {
         switch (name) {
-          case "search_summary_index": {
-            const result = await searchSummaryIndex(
+          case "search_page_index": {
+            const result = await searchPageIndex(
               String(args.query ?? ""),
               typeof args.topK === "number" ? args.topK : 5,
               typeof args.threshold === "number" ? args.threshold : 0.85
@@ -247,8 +248,8 @@ ${RULES}
             });
             break;
           }
-          case "batch_resolve_summary_index": {
-            const result = await batchResolveSummaryIndex(
+          case "batch_resolve_page_index": {
+            const result = await batchResolvePageIndex(
               (args.candidates ?? []) as Array<{
                 term: string;
                 context?: string;
@@ -256,11 +257,24 @@ ${RULES}
               typeof args.topK === "number" ? args.topK : 1,
               typeof args.threshold === "number" ? args.threshold : 0.85
             );
+            console.log(result);
+
             await logToQueue("info", "tool", "result", name, args, result);
             contents.push({ role: "model", parts: [{ functionCall }] });
             contents.push({
               role: "user",
-              parts: [{ functionResponse: { name, response: { result } } }],
+              parts: [
+                {
+                  functionResponse: {
+                    name,
+                    response: {
+                      result,
+                      guidance:
+                        "각 term의 상위 후보는 요약(summary)과 함께 제공됩니다. 제목이 유사하더라도 요약을 읽고 동일 주제인지 모델이 판단한 뒤에만 링크를 사용하세요.",
+                    },
+                  },
+                },
+              ],
             });
             break;
           }
@@ -482,9 +496,10 @@ export async function POST(request: NextRequest) {
       tools[0].functionDeclarations.map((f) => f.name)
     );
 
-    // FAST-FIRST-TURN: decide A/B. We run summary search ourselves and let the model choose between two tools.
-    // 1) Run summary index search on server (not via tool) so the model isn't forced to call any search function
-    const fastSearch = await searchSummaryIndex(linkText, 5, 0.3);
+    // FAST-FIRST-TURN: decide A/B. We run title-based page search ourselves and let the model choose between two tools.
+    // 1) Run page index search on server (not via tool) so the model isn't forced to call any search function
+    console.log(linkText);
+    const fastSearch = await searchPageIndex(linkText, 5, 0.7);
 
     // Prepare compact candidates including summaries
     const candidatesForDecision = (fastSearch.matches || []).map(
@@ -519,7 +534,7 @@ export async function POST(request: NextRequest) {
               text:
                 `링크 텍스트: "${linkText}" (${targetSlug})\n` +
                 `링크 주변 컨텍스트: ${snip(localContext, 500)}\n\n` +
-                `다음은 요약 임베딩 검색 결과 상위 후보입니다(서버 제공):\n` +
+                `다음은 제목 임베딩 검색 결과 상위 후보입니다(서버 제공):\n` +
                 `${JSON.stringify(candidatesForDecision)}\n\n` +
                 `작업: 동일 주제의 기존 문서 존재 여부를 결정하세요. 존재한다고 판단되면 redirect_to_existing(slug)를 호출하고, 없다면 declare_no_existing()을 호출하세요. 생성 관련 함수는 절대 호출하지 마세요.`,
             },
@@ -530,7 +545,39 @@ export async function POST(request: NextRequest) {
         systemInstruction:
           `당신은 제공된 후보들의 요약과 점수를 바탕으로 링크의 주제와 동일한 문서가 있는지 판단합니다.\n` +
           `후보중 일치하는 후보가 존재한다고 판단되면 redirect_to_existing(slug)를 호출하고, 아니라면 declare_no_existing()을 호출하세요.\n` +
-          `절대 다른 도구는 호출하지 마세요.`,
+          `절대 다른 도구는 호출하지 마세요.\n\n` +
+          `아래는 판단 예시입니다.\n\n` +
+          `예시)\n\n` +
+          `링크 텍스트: 광속장벽\n` +
+          `검색된 페이지: 제목: 빛의 속도 한계 — 요약: ‘광속 장벽’과 동일 개념. 물질과 정보가 c를 넘을 수 없다는 사실이 정치·경제·문화에 미친 영향까지 요약.\n` +
+          `-> 이름만 다른 경우임으로 일치\n\n` +
+          `링크 텍스트: 돔 도시\n` +
+          `검색된 페이지: 제목: 화성 독립 도시국가 - 요약:  '화성 독립 도시국가는 수백 년에 걸친 테라포밍 노력에도 불구하고 혹독한 환경에 적응하여 독자적인 문화와 기술을 발전시킨 화성 정착민들이 건설한 자치 공동체들을 일컫습니다. 이들은 지구의 통제에서 벗어나고자 했던 화성 독립 전쟁 이후 더욱 확고한 독립 노선을 걸었으며, 거대한 돔 도시나 지하 도시에 의존하여 삶을 영위했습니다.\n` +
+          `-> 화성 독립 도시국가는 돔도시를 포함하는 내용이기에 불일치` +
+          `링크 텍스트: 세대 항해선\n` +
+          `검색된 페이지: 제목: 세대 항해선 — 요약: 수 세대에 걸쳐 항해하는 우주선의 설계, 사회 구조, 항해 전략을 다룸.\n` +
+          `-> 동일 주제이므로 일치\n\n` +
+          `링크 텍스트: 알파 센타우리 상호연대\n` +
+          `검색된 페이지: 제목: 알파 센타우리 | 상호연대 — 요약: 알파 센타우리 식민지 연대체의 정치·사회 제도와 태양계와의 데이터 교환 구조.\n` +
+          `-> 표기만 다르므로 일치\n\n` +
+          `링크 텍스트: 헬륨-3 채굴\n` +
+          `검색된 페이지: 제목: 에너지 경제학 — 요약: 에너지 생산·저장·효율 전반을 다루는 상위 개념(헬륨‑3 채굴은 하위 항목).\n` +
+          `-> 포함 관계이지만 동일 주제가 아니므로 불일치\n\n` +
+          `링크 텍스트: 저속 데이터 패킷 교환\n` +
+          `검색된 페이지: 제목: 느린 패킷 데이터 교환 — 요약: 항성간 통신에서의 저속·대용량 데이터 전송 프로토콜.\n` +
+          `-> 동의어 관계이므로 일치\n\n` +
+          `링크 텍스트: 유로파 해저 도시\n` +
+          `검색된 페이지: 제목: 유로파의 해저 도시 — 요약: 유로파 빙하 아래 인프라와 사회 구조를 설명.\n` +
+          `-> 지칭만 다르므로 일치\n\n` +
+          `링크 텍스트: 금성 부유 도시\n` +
+          `검색된 페이지: 제목: 금성 기업령 — 요약: 금성 상층 대기 도시를 지배하는 기업 통치 체제(부유 도시는 하위 요소).\n` +
+          `-> 상위/하위 포괄 관계이므로 불일치\n\n` +
+          `링크 텍스트: 목성권 연맹\n` +
+          `검색된 페이지: 제목: 목성권 공화국 연맹 — 요약: 목성권 소규모 공화국들의 연합체.\n` +
+          `-> 약칭/정식명 차이이므로 일치\n\n` +
+          `링크 텍스트: 타이탄 개척자\n` +
+          `검색된 페이지: 제목: 타이탄과 그 너머의 개척자 — 요약: 타이탄뿐 아니라 외태양계 전반의 개척 흐름을 포괄.\n` +
+          `-> 링크는 더 좁고 페이지는 더 넓은 범위를 포괄하므로 불일치`,
         tools: [{ functionDeclarations: fastToolDecls }],
         toolConfig: {
           functionCallingConfig: { mode: FunctionCallingConfigMode.AUTO },

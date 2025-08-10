@@ -6,7 +6,8 @@
     "start": "next start",
     "lint": "next lint",
     "seed": "tsx scripts/seed.ts",
-    "db:migrate": "supabase migration up"
+    "db:migrate": "supabase migration up",
+    "backfill:title": "tsx scripts/backfill_title_embeddings.ts"
   },
   "dependencies": {
     "@google/genai": "^1.13.0",

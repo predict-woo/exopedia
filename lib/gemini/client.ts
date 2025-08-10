@@ -5,6 +5,7 @@ import {
   generateEmbedding,
   generateEmbeddings,
   chunkText,
+  generateTitleEmbedding,
 } from "@/lib/embeddings";
 
 // Service role client for storage operations
@@ -22,9 +23,9 @@ const ai = new GoogleGenAI({
 // Function declarations for Gemini
 const functionDeclarations = [
   {
-    name: "search_summary_index",
+    name: "search_page_index",
     description:
-      "Search for existing pages by semantic similarity of their summaries",
+      "Search for existing pages by semantic similarity of their title embeddings",
     parameters: {
       type: Type.OBJECT,
       properties: {
@@ -45,8 +46,9 @@ const functionDeclarations = [
     },
   },
   {
-    name: "batch_resolve_summary_index",
-    description: "Batch resolve multiple terms to check if pages exist",
+    name: "batch_resolve_page_index",
+    description:
+      "Batch resolve multiple terms to check if pages exist. Returns top matches including summary for model verification.",
     parameters: {
       type: Type.OBJECT,
       properties: {
@@ -163,82 +165,75 @@ const functionDeclarations = [
 ];
 
 // Function implementations
-export async function searchSummaryIndex(
+export async function searchPageIndex(
   query: string,
   topK: number = 5,
   threshold: number = 0.85
 ) {
   const supabase = await createClient();
 
-  // Generate embedding for query
-  const queryEmbedding = await generateEmbedding(query);
+  // Generate compact title embedding for query
+  const queryEmbedding = await generateTitleEmbedding(query);
 
-  // Search using pgvector
-  const { data, error } = await supabase.rpc("match_summary_embeddings", {
+  // Search using pgvector over pages.title_embedding
+  const { data, error } = await supabase.rpc("match_page_title_embeddings", {
     query_embedding: queryEmbedding,
     match_threshold: threshold,
     match_count: topK,
   });
 
   if (error) {
-    console.error("Error searching summary index:", error);
+    console.error("Error searching page index:", error);
     return { matches: [] };
   }
 
-  const matches = data || [];
-
-  // Enrich with actual page summaries so the model can decide equivalence
-  if (matches.length > 0) {
-    const pageIds = matches.map((m: { page_id: number }) => m.page_id);
-    const { data: pages } = await supabase
-      .from("pages")
-      .select("id, summary")
-      .in("id", pageIds);
-
-    const idToSummary = new Map<number, string | null>();
-    for (const p of pages || []) {
-      idToSummary.set(
-        p.id as number,
-        (p as { summary?: string | null }).summary ?? null
-      );
-    }
-
-    const enriched = matches.map(
-      (m: { page_id: number; slug: string; title: string; score: number }) => ({
-        page_id: m.page_id,
-        slug: m.slug,
-        title: m.title,
-        score: m.score,
-        summary: idToSummary.get(m.page_id) ?? null,
-      })
-    );
-
-    return { matches: enriched };
-  }
+  // data already contains summary via function; return as-is
+  const matches = (data || []).map(
+    (m: {
+      page_id: number;
+      slug: string;
+      title: string;
+      summary: string | null;
+      score: number;
+    }) => ({
+      page_id: m.page_id,
+      slug: m.slug,
+      title: m.title,
+      summary: m.summary ?? null,
+      score: m.score,
+    })
+  );
 
   return { matches };
 }
 
-export async function batchResolveSummaryIndex(
+export async function batchResolvePageIndex(
   candidates: Array<{ term: string; context?: string }>,
   topK: number = 1,
   threshold: number = 0.85
 ) {
-  const resolved = [];
-  const unresolved = [];
+  const resolved = [] as Array<{
+    term: string;
+    slug: string;
+    title: string;
+    summary: string;
+    score: number;
+  }>;
+  const unresolved = [] as Array<{ term: string }>;
 
   for (const candidate of candidates) {
     const query = candidate.context
       ? `${candidate.term} ${candidate.context}`
       : candidate.term;
 
-    const result = await searchSummaryIndex(query, topK, threshold);
+    const result = await searchPageIndex(query, topK, threshold);
 
     if (result.matches.length > 0) {
       resolved.push({
         term: candidate.term,
         slug: result.matches[0].slug,
         title: result.matches[0].title,
+        summary: result.matches[0].summary,
         score: result.matches[0].score,
       });
     } else {
@@ -357,7 +352,18 @@ export async function persistNewPage(params: {
     throw new Error("Failed to upload page content");
   }
 
-  // Insert page metadata
+  // Pre-compute title embedding (best-effort; optional)
+  let titleEmbedding: number[] | null = null;
+  try {
+    titleEmbedding = await generateTitleEmbedding(params.title);
+  } catch (e) {
+    console.warn(
+      "Failed to generate title embedding; proceeding without it",
+      e
+    );
+  }
+
+  // Insert page metadata (including optional title_embedding)
   const { data: page, error: insertError } = await supabase
     .from("pages")
     .insert({
@@ -365,6 +371,7 @@ export async function persistNewPage(params: {
       title: params.title,
       storage_object_path: storageObjectPath,
       summary: params.summary,
+      ...(titleEmbedding ? { title_embedding: titleEmbedding } : {}),
     })
     .select()
     .single();
@@ -374,12 +381,7 @@ export async function persistNewPage(params: {
     throw new Error("Failed to create page");
   }
 
-  // Generate and store embeddings
-  const summaryEmbedding = await generateEmbedding(params.summary);
-  await supabase.from("summary_embeddings").insert({
-    page_id: page.id,
-    embedding: summaryEmbedding,
-  });
+  // Generate and store content embeddings for RAG
 
   // Chunk content and generate embeddings
   const chunks = chunkText(params.markdown);
@@ -444,14 +446,7 @@ export async function persistPageUpdate(params: {
 
   await supabase.from("pages").update(updateData).eq("id", page.id);
 
-  // Update embeddings
-  if (params.summary) {
-    const summaryEmbedding = await generateEmbedding(params.summary);
-    await supabase.from("summary_embeddings").upsert({
-      page_id: page.id,
-      embedding: summaryEmbedding,
-    });
-  }
+  // No summary embedding to update anymore; title embedding remains unchanged here
 
   // Delete old content embeddings and insert new ones
   await supabase.from("content_embeddings").delete().eq("page_id", page.id);

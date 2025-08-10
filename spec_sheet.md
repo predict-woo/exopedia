@@ -22,12 +22,12 @@
 * **Database (Metadata)**: Supabase Postgres
 * **ORM**: 없음 — Supabase JS Client(SQL/RPC) 사용
 * **Storage (Page Content)**: Supabase Storage
-* **Vector**: pgvector (Supabase Postgres 내 2개의 독립 테이블)
+* **Vector**: pgvector (Supabase Postgres — 본문 청크 테이블 1개, 페이지 테이블에 제목 임베딩 열 1개)
 * **Rate Limiting**: Postgres 기반(테이블/함수)
 * **LLM API**: Google Gemini 2.5 Pro (콘텐츠 생성), Gemini 2.5 Flash (검증 및 분류)
 * **Asynchronous Tasks**: Next.js 서버 태스크 또는 Supabase Edge Functions(선택)
 * **Link Management**: 모든 링크는 Markdown 내에서만 관리 (DB 테이블로 별도 관리하지 않음)
-* **Embeddings**: OpenAI `text-embedding-3-small` (1536차원)
+* **Embeddings**: OpenAI `text-embedding-3-small` (본문 1536차원, 제목 512차원)
 
 
 ### **3. 데이터베이스 및 스토리지 스키마**
@@ -74,13 +74,14 @@
     * 페이지 본문을 의미 단위로 분할(Chunking)하여 벡터로 저장합니다.
     * Key: page_id:chunk_index
     * Dimension: 1536, Metric: cosine, Embedding Model: OpenAI `text-embedding-3-small`
-2. **Summary-Embeddings Table**: **링크 검증 및 중복 확인용**
-    * 페이지의 summary를 벡터로 저장합니다.
-    * Key: page_id
-    * Dimension: 1536, Metric: cosine, Embedding Model: OpenAI `text-embedding-3-small`
+2. **Page Title Embedding (pages.title_embedding)**: **링크 검증 및 중복 확인용**
+    * 페이지의 제목을 벡터로 저장합니다.
+    * Location: `pages.title_embedding vector(512)` (nullable — 백필 스크립트로 채움)
+    * Dimension: 512, Metric: cosine, Embedding Model: OpenAI `text-embedding-3-small` with `dimensions: 512`
 
 임베딩 생성 원칙
-* 모든 쿼리/문서 임베딩은 OpenAI `text-embedding-3-small`로 계산합니다(1536차원).
+* 본문/쿼리(RAG)는 OpenAI `text-embedding-3-small` 1536차원.
+* 페이지 제목/쿼리(동일 페이지 판정)는 OpenAI `text-embedding-3-small` 512차원.
 * 검색 시: 쿼리 텍스트를 임베딩 → 해당 인덱스에서 cosine 유사도 기반 topK 검색.
 * 저장/업데이트 시: summary 및 본문 청크를 임베딩하여 각각의 인덱스에 upsert.
 
@@ -109,12 +110,12 @@
 모델은 전체 `source` 문서와 `localContext`를 입력으로 받아 아래 분기를 자율적으로 수행합니다.
 
 분기 결정 정책(명시)
-- 모델은 먼저 `search_summary_index`를 호출해 상위 후보를 조회합니다(topK 기본 5, threshold 기본 0.85 권장).
+- 모델은 먼저 `search_page_index`를 호출해 상위 후보를 조회합니다(topK 기본 5, threshold 기본 0.85 권장).
 - 유의미한 후보가 존재하고 특정 후보가 동일/동일시 가능한 주제로 확정되면 → 반드시 분기 A로 진행하고, 분기 B로 절대 진행하지 않습니다.
 - 상위 후보가 없거나 임계치를 넘지 못해 동일 주제를 확정할 수 없다면 → 분기 B로 진행합니다.
 
 **분기 A: 동일/유사 주제 문서가 이미 존재하는 경우**
-1. 모델이 `search_summary_index`를 호출해 상위 후보를 확인하고, 기준을 충족하면 `redirect_to_existing({ slug })`를 호출합니다.
+1. 모델이 `search_page_index`를 호출해 상위 후보를 확인하고, 기준을 충족하면 `redirect_to_existing({ slug })`를 호출합니다.
     * 백엔드는 즉시 사용자에게 {"redirect": "/wiki/{slug}"}로 응답합니다.
 2. 모델이 `get_page({ slug })`로 기존 문서 전체를 가져와 읽은 뒤, `sourceSlug` 문서의 해당 빨간 링크를 파란 링크([표기](/wiki/{slug}))로 바꾸고, 필요 시 관련 내용에 한해 보강/정정을 포함하여 편집합니다.
     * 편집 범위 가이드:
@@ -128,7 +129,7 @@
 **분기 B: 존재하지 않는 경우(신규 생성)**
 1. 모델이 필요 시 `search_content_index`(RAG)를 자율 호출하여 컨텍스트를 수집합니다.
 2. 모델이 신규 문서의 요약과 본문 초안을 작성합니다.
-3. 모델이 초안에서 링크 후보를 추출하고, 각 후보에 대해 `batch_resolve_summary_index`(또는 `search_summary_index`)로 존재 여부를 확인합니다.
+3. 모델이 초안에서 링크 후보를 추출하고, 각 후보에 대해 `batch_resolve_page_index`(또는 `search_page_index`)로 존재 여부를 확인합니다.
     * 존재: [표기](/wiki/{slug})로 삽입
     * 미존재: [표기](/create/{target-slug})로 삽입 (source 정보 미포함)
 4. 모델이 최종 Markdown과 메타데이터(title, proposedSlug, summary 등)를 `persist_new_page(...)`로 저장합니다.
@@ -160,12 +161,12 @@
 
 모든 함수는 OpenAPI 하위 집합 스키마에 맞춘 JSON I/O를 사용합니다. 대표 함수 명세는 아래와 같습니다.
 
-1) search_summary_index
+1) search_page_index
     * 입력: { query: string, topK?: number, threshold?: number }
-    * 출력: { matches: [{ pageId: number, slug: string, title: string, score: number }] }
-    * 처리: OpenAI `text-embedding-3-small`로 쿼리 임베딩 후 Summary 임베딩 테이블(pgvector)에서 cosine 검색
+    * 출력: { matches: [{ pageId: number, slug: string, title: string, summary?: string | null, score: number }] }
+    * 처리: OpenAI `text-embedding-3-small` 512차원으로 쿼리 임베딩 후 Pages.title_embedding에서 cosine 검색
 
-2) batch_resolve_summary_index
+2) batch_resolve_page_index
     * 입력: { candidates: [{ term: string, context?: string }], topK?: number, threshold?: number }
     * 출력: { resolved: [{ term: string, slug: string, title: string, score: number }], unresolved: [{ term: string }] }
     * 처리: 각 term(+context)을 임베딩하여 Summary 임베딩 테이블(pgvector)에서 일괄 검색
