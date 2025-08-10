@@ -130,7 +130,7 @@ ${RULES}
 작업 순서(분기 B 전용):
 1. search_content_index(RAG)를 이용한 주제에 대한 사전조사, 최대 1번
 2. 신규 문서 요약 및 본문 초안 생각
-3. 초안의 각 부분에 대한 search_content_index(RAG), 1~3번까지 가능, 되도록이면 적게. 이후 검색된 정보를 활용한 수정본 생각
+3. 초안의 각 부분에 대한 search_content_index(RAG), 1~3번까지 가능. 이후 검색된 정보를 활용한 수정본 생각
 4. 생각한 수정본에서 추출할만한 링크가 무엇이 있을지 생각합니다.
 5. 반드시 batch_resolve_page_index로 링크 존재 여부를 조회합니다. 각 후보에 대해 반환된 summary를 읽고, 제목 유사도에 의존하지 말고 요약 내용 기준으로 동일 주제라고 명확히 판단될 때에만 /wiki/{slug}로 연결하세요. 애매하거나 불확실하면 그대로 /create/{target-slug}를 유지합니다.
 6. persist_new_page로 저장
